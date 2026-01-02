@@ -8,7 +8,7 @@ import re
 from datetime import date, datetime, timedelta
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 
 from .config import APP_NAME, BASE_DIR, URPL_HINTS
 from .db import init_db, db_exec, db_one, db_all, connect, get_setting, set_setting
@@ -225,9 +225,72 @@ class App(tk.Tk):
                 messagebox.showerror("Logowanie", "Błędne hasło.")
                 return
 
+        if self._must_change_default_admin_password(u):
+            if not self._force_admin_password_change(u):
+                return
+            refreshed = db_one("SELECT * FROM users WHERE user_id=?", (u["user_id"],))
+            if refreshed:
+                u = dict(refreshed)
+
         self.user = u
         self.admin_view_as_doctor = False
         self.show_main()
+
+    def _must_change_default_admin_password(self, user: dict) -> bool:
+        try:
+            if not user:
+                return False
+            if (user.get("username") or "").lower() != "admin" or user.get("role") != ROLE_ADMIN:
+                return False
+            ph = user.get("password_hash") or ""
+            ps = user.get("password_salt") or ""
+            if not ph or not ps:
+                return True
+            return verify_password("admin", ph, ps)
+        except Exception:
+            return False
+
+    def _force_admin_password_change(self, user: dict) -> bool:
+        messagebox.showinfo(
+            "Logowanie",
+            "Wymagana jest zmiana domyślnego hasła konta admin. Podaj nowe hasło.",
+        )
+
+        while True:
+            new_pw = simpledialog.askstring(
+                "Nowe hasło admin",
+                "Wpisz nowe hasło (min. 4 znaki).",
+                show="•",
+                parent=self,
+            )
+            if new_pw is None:
+                messagebox.showwarning("Logowanie", "Zmiana hasła jest wymagana dla konta admin.")
+                return False
+            new_pw = new_pw.strip()
+            if len(new_pw) < 4:
+                messagebox.showerror("Logowanie", "Hasło musi mieć co najmniej 4 znaki.")
+                continue
+
+            confirm = simpledialog.askstring(
+                "Powtórz hasło",
+                "Powtórz nowe hasło dla potwierdzenia.",
+                show="•",
+                parent=self,
+            )
+            if confirm is None:
+                messagebox.showwarning("Logowanie", "Zmiana hasła jest wymagana dla konta admin.")
+                return False
+            if new_pw != (confirm or "").strip():
+                messagebox.showerror("Logowanie", "Hasła nie są zgodne. Spróbuj ponownie.")
+                continue
+
+            ph, ps = hash_password(new_pw)
+            db_exec(
+                "UPDATE users SET password_hash=?, password_salt=?, updated_at=? WHERE user_id=?",
+                (ph, ps, now_str(), user.get("user_id")),
+            )
+            messagebox.showinfo("Logowanie", "Hasło zostało zmienione. Kontynuuję logowanie.")
+            return True
 
     # ===== main =====
     def show_main(self):
