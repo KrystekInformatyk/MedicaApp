@@ -6,6 +6,7 @@ import json
 import os
 import random
 import re
+import hashlib
 from datetime import date, datetime, timedelta, time
 
 import tkinter as tk
@@ -19,6 +20,17 @@ from .auth.security import (
 )
 from .services.import_urpl import import_urpl_csv
 from .utils import now_str
+
+DEFAULT_SLOTS = {
+    "RANO": "08:00",
+    "POŁUDNIE": "12:00",
+    "WIECZÓR": "18:00",
+    "NOC": "22:00",
+}
+
+ICON_1 = "⚠️"
+ICON_2 = "⛔"
+ICON_3 = "☠️"
 
 def setup_style(root: tk.Tk):
     try:
@@ -179,6 +191,163 @@ def patient_row():
     return db_one("SELECT * FROM patients WHERE patient_id=?", (pid,))
 
 
+def parse_hhmm(text: str) -> time:
+    hh, mm = (text or "").split(":", 1)
+    return time(int(hh), int(mm))
+
+
+def planned_dt_for_order(order_row, target_date: date) -> datetime | None:
+    """Wyznacza planowaną datę/czas dla zlecenia na dany dzień."""
+    try:
+        t_str = (order_row.get("time_str") or DEFAULT_SLOTS.get(order_row.get("slot_label"), "")).strip()
+    except Exception:
+        t_str = ""
+    if not t_str:
+        return None
+    try:
+        hhmm = parse_hhmm(t_str)
+    except Exception:
+        return None
+    try:
+        return datetime.combine(target_date, hhmm)
+    except Exception:
+        return None
+
+
+def order_is_active_at(order_row, planned_dt: datetime | None) -> bool:
+    if not order_row or not planned_dt:
+        return False
+    if order_row.get("status") != "AKTYWNE":
+        return False
+
+    try:
+        ef_from = order_row.get("effective_from")
+        if ef_from and planned_dt < datetime.fromisoformat(ef_from):
+            return False
+    except Exception:
+        pass
+
+    try:
+        ef_to = order_row.get("effective_to")
+        if ef_to and planned_dt > datetime.fromisoformat(ef_to):
+            return False
+    except Exception:
+        pass
+
+    return True
+
+
+def lekarz_exists_for_day_med(planned_dt: datetime, med_id: str):
+    if not planned_dt or not med_id:
+        return None
+    t0 = datetime.combine(planned_dt.date(), time(0, 0, 0))
+    t1 = t0 + timedelta(days=1)
+    return db_one(
+        """
+        SELECT * FROM administrations
+        WHERE patient_id=? AND med_id=? AND planned_dt >= ? AND planned_dt < ?
+        ORDER BY ts DESC LIMIT 1
+        """,
+        (current_patient_id(), med_id, t0.isoformat(timespec="seconds"), t1.isoformat(timespec="seconds")),
+    )
+
+
+def active_blocks_text() -> str:
+    rows = db_all(
+        "SELECT block_value FROM blocks WHERE patient_id=? AND status='AKTYWNA'",
+        (current_patient_id(),),
+    )
+    if not rows:
+        return ""
+    vals = ", ".join(sorted({(r["block_value"] or "").strip().upper() for r in rows if r["block_value"]}))
+    return f"BLOKADY: {vals}" if vals else ""
+
+
+def is_class_blocked(drug_class: str | None) -> bool:
+    if not drug_class:
+        return False
+    return bool(
+        db_one(
+            "SELECT 1 FROM blocks WHERE patient_id=? AND block_value=? AND status='AKTYWNA'",
+            (current_patient_id(), (drug_class or "").strip().upper()),
+        )
+    )
+
+
+def interactions_badge(med_row) -> str:
+    if not med_row:
+        return ""
+    if med_row.get("critical"):
+        return ICON_2
+    for lvl, icon in (("interactions_lvl3", ICON_3), ("interactions_lvl2", ICON_2), ("interactions_lvl1", ICON_1)):
+        if med_row.get(lvl):
+            return icon
+    return ""
+
+
+def prn_sum_today(med_id: str) -> int:
+    t0 = datetime.combine(date.today(), time(0, 0, 0))
+    t1 = t0 + timedelta(days=1)
+    row = db_one(
+        """
+        SELECT COALESCE(SUM(prn_mg),0) AS s FROM administrations
+        WHERE patient_id=? AND med_id=? AND prn_mg IS NOT NULL AND status='PODANO' AND ts>=? AND ts<?
+        """,
+        (current_patient_id(), med_id, t0.isoformat(timespec="seconds"), t1.isoformat(timespec="seconds")),
+    )
+    try:
+        return int(row["s"])
+    except Exception:
+        return 0
+
+
+def prn_last_admin(med_id: str):
+    return db_one(
+        """
+        SELECT * FROM administrations
+        WHERE patient_id=? AND med_id=? AND prn_mg IS NOT NULL AND status='PODANO'
+        ORDER BY ts DESC LIMIT 1
+        """,
+        (current_patient_id(), med_id),
+    )
+
+
+def titration_for_med(med_id: str):
+    return db_one(
+        "SELECT * FROM titrations WHERE patient_id=? AND med_id=? AND is_active=1",
+        (current_patient_id(), med_id),
+    )
+
+
+def titrated_mg_for_day(tit_row, target_date: date) -> int:
+    if not tit_row:
+        return 0
+    try:
+        start = date.fromisoformat(tit_row["start_date"])
+        if target_date < start:
+            return int(tit_row["start_mg"])
+        days = (target_date - start).days
+        step_days = max(1, int(tit_row["step_days"]))
+        steps = max(0, days // step_days)
+        mg = int(tit_row["start_mg"]) + steps * int(tit_row["step_mg"])
+        return min(mg, int(tit_row["max_mg"]))
+    except Exception:
+        try:
+            return int(tit_row.get("start_mg", 0))
+        except Exception:
+            return 0
+
+
+def is_change_day(tit_row, target_date: date) -> bool:
+    try:
+        start = date.fromisoformat(tit_row["start_date"])
+        if target_date < start:
+            return False
+        return ((target_date - start).days % max(1, int(tit_row["step_days"]))) == 0
+    except Exception:
+        return False
+
+
 # ======================= APP =======================
 class App(tk.Tk):
     def __init__(self):
@@ -200,6 +369,7 @@ class App(tk.Tk):
         self._last_day = date.today()
         self.after(30_000, self._day_rollover_tick)
 
+        self._ensure_admin_password_set()
         self.show_role_picker()
 
     # ===== start: role picker =====
@@ -337,6 +507,37 @@ class App(tk.Tk):
             messagebox.showinfo("Logowanie", "Hasło zostało zmienione. Kontynuuję logowanie.")
             return True
 
+    def _ensure_admin_password_set(self):
+        try:
+            admin = db_one("SELECT * FROM users WHERE username='admin' AND role=?", (ROLE_ADMIN,))
+        except Exception:
+            return
+        if not admin:
+            return
+
+        admin = dict(admin)
+        if not self._must_change_default_admin_password(admin):
+            return
+
+        messagebox.showinfo(
+            "Administrator",
+            "Ustaw hasło administratora, aby rozpocząć pracę (domyślne hasło jest zablokowane).",
+        )
+
+        while True:
+            if self._force_admin_password_change(admin):
+                return
+            retry = messagebox.askyesno(
+                "Administrator",
+                "Hasło administratora jest wymagane. Spróbować ponownie?",
+                parent=self,
+            )
+            if not retry:
+                try:
+                    self.destroy()
+                finally:
+                    return
+
     # ===== main =====
     def show_main(self):
         for w in self.winfo_children():
@@ -419,9 +620,6 @@ class App(tk.Tk):
 
     def refresh_all(self):
         if self.user["role"] == ROLE_ADMIN and not getattr(self,"admin_view_as_doctor",False):
-            self.tab_admin = ttk.Frame(self.nb)
-            self.nb.add(self.tab_admin, text="ADMIN")
-            self.build_admin()
             self.refresh_admin()
         elif self.user["role"] == ROLE_NURSE:
             self.refresh_give_page()
@@ -1496,12 +1694,7 @@ class App(tk.Tk):
 
     def _refresh_prn_combo(self, combo: ttk.Combobox):
         items = []
-        if self.user["role"] == ROLE_ADMIN and not getattr(self,"admin_view_as_doctor",False):
-            self.tab_admin = ttk.Frame(self.nb)
-            self.nb.add(self.tab_admin, text="ADMIN")
-            self.build_admin()
-            self.refresh_admin()
-        elif self.user["role"] == ROLE_NURSE:
+        if self.user["role"] == ROLE_NURSE:
             rows = db_all("""
                 SELECT m.med_id, m.name, m.policy, m.drug_class
                 FROM prn_permissions p
@@ -1561,12 +1754,7 @@ class App(tk.Tk):
         badge = interactions_badge(m)
         badge_txt = f"{badge}  " if badge else ""
 
-        if self.user["role"] == ROLE_ADMIN and not getattr(self,"admin_view_as_doctor",False):
-            self.tab_admin = ttk.Frame(self.nb)
-            self.nb.add(self.tab_admin, text="ADMIN")
-            self.build_admin()
-            self.refresh_admin()
-        elif self.user["role"] == ROLE_NURSE:
+        if self.user["role"] == ROLE_NURSE:
             p = db_one("""
                 SELECT * FROM prn_permissions
                 WHERE patient_id=? AND user_id=? AND med_id=? AND is_active=1
@@ -1688,12 +1876,7 @@ class App(tk.Tk):
             return
 
         # pielęgniarka: twarde limity z prn_permissions
-        if self.user["role"] == ROLE_ADMIN and not getattr(self,"admin_view_as_doctor",False):
-            self.tab_admin = ttk.Frame(self.nb)
-            self.nb.add(self.tab_admin, text="ADMIN")
-            self.build_admin()
-            self.refresh_admin()
-        elif self.user["role"] == ROLE_NURSE:
+        if self.user["role"] == ROLE_NURSE:
             p = db_one("""
                 SELECT * FROM prn_permissions
                 WHERE patient_id=? AND user_id=? AND med_id=? AND is_active=1
