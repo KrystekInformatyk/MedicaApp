@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+from pathlib import Path
 import random
 import re
 from datetime import date, datetime, timedelta
@@ -539,20 +540,28 @@ class App(tk.Tk):
         except Exception:
             return
 
-        # szukaj CSV w folderze aplikacji
+        # szukaj CSV w folderze projektu (BASE_DIR) i w folderze modułu jako rezerwę
         try:
-            base = os.path.dirname(os.path.abspath(__file__))
+            search_roots = [Path(BASE_DIR), Path(__file__).resolve().parent]
         except Exception:
-            base = os.getcwd()
+            search_roots = [Path(os.getcwd())]
 
-        cand = None
+        cand: str | None = None
         try:
-            for fn in os.listdir(base):
-                if not fn.lower().endswith(".csv"):
+            for root in search_roots:
+                if not root.exists():
                     continue
-                # preferuj pliki z rejestrem
-                if "rejestr_produktow_leczniczych" in fn.lower() or "produktow_leczniczych" in fn.lower():
-                    cand = os.path.join(base, fn)
+                for entry in root.iterdir():
+                    if not entry.is_file() or entry.suffix.lower() != ".csv":
+                        continue
+                    lower_name = entry.name.lower()
+                    hint_match = any(h.lower() in lower_name for h in URPL_HINTS)
+                    if hint_match:
+                        cand = str(entry)
+                        break
+                    if cand is None:
+                        cand = str(entry)
+                if cand:
                     break
             if cand is None:
                 return
