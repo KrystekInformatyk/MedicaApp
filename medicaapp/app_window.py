@@ -227,7 +227,61 @@ class App(tk.Tk):
 
         self.user = u
         self.admin_view_as_doctor = False
+        if u.get("must_change_password"):
+            ok = self._force_password_change(u)
+            if not ok:
+                self.user = None
+                return
+
         self.show_main()
+
+    def _force_password_change(self, user: dict) -> bool:
+        """Wymusza ustawienie nowego hasła (np. dla admin/admin)."""
+        win = tk.Toplevel(self)
+        win.title("Zmień hasło")
+        win.geometry("360x220")
+        win.grab_set()
+
+        frm = ttk.Frame(win, padding=14)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Nowe hasło wymagane", style="H1.TLabel").pack(anchor="w")
+        ttk.Label(frm, text="Zmień hasło, aby kontynuować.", style="Muted.TLabel").pack(anchor="w", pady=(2, 10))
+
+        ttk.Label(frm, text="Nowe hasło", style="Muted.TLabel").pack(anchor="w")
+        e1 = ttk.Entry(frm, show="•")
+        e1.pack(fill="x")
+
+        ttk.Label(frm, text="Powtórz nowe hasło", style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
+        e2 = ttk.Entry(frm, show="•")
+        e2.pack(fill="x")
+
+        status = {"ok": False}
+
+        def zapisz():
+            p1 = (e1.get() or "").strip()
+            p2 = (e2.get() or "").strip()
+            if not p1:
+                messagebox.showerror("Hasło", "Wpisz nowe hasło.", parent=win)
+                return
+            if p1 != p2:
+                messagebox.showerror("Hasło", "Hasła nie są identyczne.", parent=win)
+                return
+
+            ph, ps = hash_password(p1)
+            db_exec(
+                "UPDATE users SET password_hash=?, password_salt=?, must_change_password=0, updated_at=? WHERE user_id=?",
+                (ph, ps, now_str(), user["user_id"]),
+            )
+            user["must_change_password"] = 0
+            status["ok"] = True
+            messagebox.showinfo("Hasło", "Hasło zapisane. Możesz korzystać z aplikacji.", parent=win)
+            win.destroy()
+
+        ttk.Button(frm, text="Zapisz", style="Primary.TButton", command=zapisz).pack(anchor="e", pady=(14, 0))
+        e1.focus_set()
+        win.wait_window()
+        return status["ok"]
 
     # ===== main =====
     def show_main(self):

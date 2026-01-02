@@ -66,6 +66,7 @@ def init_db():
             role TEXT NOT NULL,
             password_hash TEXT,
             password_salt TEXT,
+            must_change_password INTEGER NOT NULL DEFAULT 0,
             is_active INTEGER NOT NULL DEFAULT 1,
             created_by INTEGER,
             created_at TEXT NOT NULL,
@@ -171,13 +172,14 @@ def init_db():
     ensure_column("meds", "color_hex", "TEXT")
     ensure_column("orders", "patient_id", "INTEGER NOT NULL DEFAULT 1")
     ensure_column("administrations", "patient_id", "INTEGER NOT NULL DEFAULT 1")
+    ensure_column("users", "must_change_password", "INTEGER NOT NULL DEFAULT 0")
 
     # konto startowe admin (admin/admin) jeśli pusto
     if not db_one("SELECT 1 FROM users LIMIT 1"):
         pw_hash, pw_salt = hash_password("admin")
         db_exec(
-            "INSERT INTO users(username, full_name, role, password_hash, password_salt, is_active, created_at) VALUES (?,?,?,?,?,1,?)",
-            ("admin", "Administrator", ROLE_ADMIN, pw_hash, pw_salt, now_str()),
+            "INSERT INTO users(username, full_name, role, password_hash, password_salt, must_change_password, is_active, created_at) VALUES (?,?,?,?,?,?,1,?)",
+            ("admin", "Administrator", ROLE_ADMIN, pw_hash, pw_salt, 1, now_str()),
         )
 
 def get_setting(key: str, default: str = "") -> str:
