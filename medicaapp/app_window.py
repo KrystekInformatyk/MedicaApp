@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import calendar
 import csv
 import json
 import os
 import random
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, simpledialog
+from tkinter import ttk, messagebox, filedialog, simpledialog, colorchooser
 
 from .config import APP_NAME, BASE_DIR, URPL_HINTS
 from .db import init_db, db_exec, db_one, db_all, connect, get_setting, set_setting
@@ -132,6 +133,50 @@ def show_med_details(parent, med_id: str):
         block("Dodatkowe", m["extra_info"])
 
     ttk.Button(frm, text="Zamknij", style="Soft.TButton", command=win.destroy).pack(anchor="e", pady=10)
+
+
+def _ensure_current_patient_id() -> int:
+    try:
+        pid = int(get_setting("current_patient_id", "") or 0)
+    except Exception:
+        pid = 0
+
+    row = db_one("SELECT patient_id FROM patients WHERE patient_id=?", (pid,)) if pid else None
+    if row:
+        return pid
+
+    row = db_one("SELECT patient_id FROM patients ORDER BY patient_id ASC LIMIT 1")
+    if row:
+        pid = int(row["patient_id"])
+    else:
+        db_exec(
+            "INSERT INTO patients(display_name, full_name, created_at, updated_at, is_active) VALUES (?,?,?,?,1)",
+            ("Pacjent", None, now_str(), now_str()),
+        )
+        pid = int(db_one("SELECT patient_id FROM patients ORDER BY patient_id DESC LIMIT 1")["patient_id"])
+
+    set_setting("current_patient_id", str(pid))
+    return pid
+
+
+def current_patient_id() -> int:
+    return _ensure_current_patient_id()
+
+
+def set_current_patient_id(pid: int):
+    try:
+        set_setting("current_patient_id", str(int(pid)))
+    except Exception:
+        pass
+
+
+def patient_row():
+    pid = current_patient_id()
+    row = db_one("SELECT * FROM patients WHERE patient_id=?", (pid,))
+    if row:
+        return row
+    pid = _ensure_current_patient_id()
+    return db_one("SELECT * FROM patients WHERE patient_id=?", (pid,))
 
 
 # ======================= APP =======================
@@ -1461,9 +1506,9 @@ class App(tk.Tk):
                 SELECT m.med_id, m.name, m.policy, m.drug_class
                 FROM prn_permissions p
                 JOIN meds m ON m.med_id=p.med_id
-                WHERE p.user_id=? AND p.is_active=1 AND m.is_active=1 AND m.med_type='DORAŹNY'
+                WHERE p.patient_id=? AND p.user_id=? AND p.is_active=1 AND m.is_active=1 AND m.med_type='DORAŹNY'
                 ORDER BY m.name
-            """, (self.user["user_id"],))
+            """, (current_patient_id(), self.user["user_id"]))
             for r in rows:
                 if r["policy"] == "ZABRONIONY":
                     continue
@@ -1524,7 +1569,7 @@ class App(tk.Tk):
         elif self.user["role"] == ROLE_NURSE:
             p = db_one("""
                 SELECT * FROM prn_permissions
-                WHERE user_id=? AND med_id=? AND is_active=1
+                WHERE patient_id=? AND user_id=? AND med_id=? AND is_active=1
             """, (current_patient_id(), self.user["user_id"], mid))
             if not p:
                 self.prn_limits.configure(text=f"{badge_txt}Brak uprawnień PRN.")
@@ -1651,7 +1696,7 @@ class App(tk.Tk):
         elif self.user["role"] == ROLE_NURSE:
             p = db_one("""
                 SELECT * FROM prn_permissions
-                WHERE user_id=? AND med_id=? AND is_active=1
+                WHERE patient_id=? AND user_id=? AND med_id=? AND is_active=1
             """, (current_patient_id(), self.user["user_id"], mid))
             if not p:
                 messagebox.showerror("PRN", "Brak uprawnień PRN.")
@@ -2052,7 +2097,7 @@ class App(tk.Tk):
             UPDATE blocks
             SET status='ZDJĘTA', lifted_at=?, lifted_by=?, lift_reason=?
             WHERE block_id=?
-        """, (current_patient_id(), now_str(), self.user["user_id"], lr, bid))
+        """, (now_str(), self.user["user_id"], lr, bid))
         self.e_bid.delete(0, "end")
         self.e_lift_reason.delete(0, "end")
         self.refresh_all()
@@ -2523,7 +2568,7 @@ class App(tk.Tk):
             SELECT t.*, m.name AS med_name
             FROM titrations t JOIN meds m ON m.med_id=t.med_id
             ORDER BY t.titration_id DESC
-        """, (current_patient_id(),))
+        """)
         for r in rows:
             self.titr_tree.insert("", "end", values=(
                 r["titration_id"], r["med_name"], r["start_date"], r["start_mg"], r["step_mg"], r["step_days"], r["max_mg"], r["is_active"]
@@ -2616,6 +2661,7 @@ class App(tk.Tk):
             FROM prn_permissions p
             JOIN users u ON u.user_id=p.user_id
             JOIN meds m ON m.med_id=p.med_id
+            WHERE p.patient_id=?
             ORDER BY p.prn_id DESC
         """, (current_patient_id(),))
         for r in rows:
@@ -2661,7 +2707,7 @@ class App(tk.Tk):
 
         existing = db_one("""
             SELECT prn_id FROM prn_permissions
-            WHERE user_id=? AND med_id=? AND is_active=1
+            WHERE patient_id=? AND user_id=? AND med_id=? AND is_active=1
         """, (current_patient_id(), nurse_id, med_id))
         if existing:
             db_exec("""
@@ -2672,7 +2718,7 @@ class App(tk.Tk):
         else:
             db_exec("""
                 INSERT INTO prn_permissions(patient_id, user_id, med_id, mg_min, mg_max, mg_step, max_mg_per_day, min_interval_min, created_at)
-                VALUES (?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?)
             """, (current_patient_id(), nurse_id, med_id, mgmin, mgmax, step, day, interval, now_str()))
 
         self.e_pmin.delete(0, "end"); self.e_pmax.delete(0, "end")
