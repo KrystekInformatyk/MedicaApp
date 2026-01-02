@@ -8,7 +8,7 @@ import re
 from datetime import date, datetime, timedelta
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, colorchooser
 
 from .config import APP_NAME, BASE_DIR, URPL_HINTS
 from .db import init_db, db_exec, db_one, db_all, connect, get_setting, set_setting
@@ -225,9 +225,81 @@ class App(tk.Tk):
                 messagebox.showerror("Logowanie", "Błędne hasło.")
                 return
 
+        if self._requires_default_admin_pw_change(u):
+            changed = self._force_admin_password_change(u)
+            if not changed:
+                messagebox.showwarning("Logowanie", "Aby przejść dalej ustaw nowe hasło administratora.")
+                return
+            u = dict(db_one("SELECT * FROM users WHERE user_id=?", (u["user_id"],)))
+
         self.user = u
         self.admin_view_as_doctor = False
         self.show_main()
+
+    def _requires_default_admin_pw_change(self, user_row: dict) -> bool:
+        if not user_row or user_row.get("username") != "admin":
+            return False
+        try:
+            pw_hash = user_row.get("password_hash") or ""
+            salt = user_row.get("password_salt") or ""
+            if not pw_hash or not salt:
+                return False
+            return verify_password("admin", pw_hash, salt)
+        except Exception:
+            return False
+
+    def _force_admin_password_change(self, user_row: dict) -> bool:
+        dlg = tk.Toplevel(self)
+        dlg.title("Zmień hasło administratora")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Wymagana zmiana domyślnego hasła admin/admin.", style="H1.TLabel").pack(anchor="w")
+        ttk.Label(frm, text="Podaj nowe hasło i potwierdź.", style="Muted.TLabel").pack(anchor="w", pady=(2, 10))
+
+        ttk.Label(frm, text="Nowe hasło", style="Muted.TLabel").pack(anchor="w")
+        e1 = ttk.Entry(frm, show="•")
+        e1.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(frm, text="Powtórz hasło", style="Muted.TLabel").pack(anchor="w")
+        e2 = ttk.Entry(frm, show="•")
+        e2.pack(fill="x")
+
+        result = {"ok": False}
+
+        def save():
+            pw1 = e1.get().strip()
+            pw2 = e2.get().strip()
+            if not pw1:
+                messagebox.showerror("Hasło", "Podaj nowe hasło.", parent=dlg)
+                return
+            if pw1 == "admin":
+                messagebox.showerror("Hasło", "Hasło nie może pozostać domyślne.", parent=dlg)
+                return
+            if pw1 != pw2:
+                messagebox.showerror("Hasło", "Hasła muszą być takie same.", parent=dlg)
+                return
+
+            ph, ps = hash_password(pw1)
+            db_exec(
+                "UPDATE users SET password_hash=?, password_salt=?, updated_at=? WHERE user_id=?",
+                (ph, ps, now_str(), user_row["user_id"]),
+            )
+            result["ok"] = True
+            dlg.destroy()
+            messagebox.showinfo("Hasło", "Hasło administratora zostało zmienione.")
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Zapisz", style="Primary.TButton", command=save).pack(side="right")
+        ttk.Button(btns, text="Anuluj", style="Soft.TButton", command=dlg.destroy).pack(side="right", padx=(0, 8))
+
+        e1.focus_set()
+        dlg.wait_window()
+        return result["ok"]
 
     # ===== main =====
     def show_main(self):
